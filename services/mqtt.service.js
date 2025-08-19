@@ -191,6 +191,42 @@ async function checkOfflineZones() {
     const onlineZones = [];
     const offlineZones = [];
 
+    // ถ้า array ว่าง = ไม่มีข้อมูลเลย
+    if (deviceStatus.length === 0) {
+        try {
+            // update ทุก device ให้เป็น offline
+            await Device.updateMany(
+                {},
+                {
+                    $set: {
+                        'status.stream_enabled': false,
+                        'status.volume': 0,
+                        'status.is_playing': false,
+                        lastSeen: new Date()
+                    }
+                }
+            );
+
+            // broadcast ว่า offline ทุกตัว
+            const allDevices = await Device.find({});
+            allDevices.forEach(d => {
+                broadcast({
+                    zone: d.no,
+                    stream_enabled: false,
+                    volume: 0,
+                    is_playing: false,
+                    offline: true
+                });
+            });
+
+            console.log("⚠️ deviceStatus ว่าง → ตั้งค่าทุกโซนเป็น offline");
+        } catch (err) {
+            console.error("❌ Failed to mark all devices offline:", err.message);
+        }
+        return; // ออกจากฟังก์ชัน ไม่ต้องทำต่อ
+    }
+
+    // กรณีมีบาง zone อยู่ → เช็คแบบปกติ
     deviceStatus = deviceStatus.filter(d => {
         const online = now - d.lastSeen <= 35000;
         if (online) {
