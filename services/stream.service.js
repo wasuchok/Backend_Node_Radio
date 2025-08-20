@@ -1,3 +1,4 @@
+// services/stream.service.js
 const { spawn } = require('child_process');
 const cfg = require('../config/config');
 const bus = require('./bus');
@@ -11,6 +12,10 @@ let ffmpegProcess = null;
 let isPaused = false;
 let currentStreamUrl = null;
 
+let stopping = false;
+let starting = false;
+let activeWs = null;
+
 const isAlive = (p) => !!p && p.exitCode === null;
 
 function wireChildLogging(child, tag) {
@@ -21,27 +26,42 @@ function wireChildLogging(child, tag) {
     child.on('error', (err) => console.error(`[${tag}] error:`, err));
 }
 
+function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
 function stopProcess(proc) {
     if (!proc) return Promise.resolve();
     if (proc.exitCode !== null || proc.signalCode) return Promise.resolve();
+
     return new Promise((resolve) => {
         const done = () => { proc.removeAllListeners('close'); resolve(); };
         proc.once('close', done);
+
+        try { proc.stdin?.end(); } catch { }
         try { proc.kill('SIGTERM'); } catch { }
-        setTimeout(() => {
+
+        const hardKill = setTimeout(() => {
             if (proc.exitCode === null && !proc.killed) {
                 try { proc.kill('SIGKILL'); } catch { }
             }
-        }, 2000);
+        }, 1500);
+
+        proc.once('close', () => clearTimeout(hardKill));
     });
 }
 
 async function stopAll() {
-    await Promise.all([stopProcess(ffmpegProcess)]);
-    ffmpegProcess = null;
-    isPaused = false;
-    currentStreamUrl = null;
-    bus.emit('status', { event: 'stopped' });
+    if (stopping) return;
+    stopping = true;
+    try {
+        await Promise.all([stopProcess(ffmpegProcess)]);
+    } finally {
+        ffmpegProcess = null;
+        isPaused = false;
+        currentStreamUrl = null;
+        bus.emit('status', { event: 'stopped' });
+        await sleep(250); // ให้ Icecast เคลียร์ mount
+        stopping = false;
+    }
 }
 
 function resolveDirectUrl(youtubeUrl) {
@@ -72,102 +92,112 @@ function resolveDirectUrl(youtubeUrl) {
 }
 
 async function start(youtubeUrl) {
-    await stopAll();
-    console.log(`▶️ เริ่มสตรีม YouTube: ${youtubeUrl}`);
+    while (starting) await sleep(50);
+    starting = true;
+    try {
+        await stopAll();
+        console.log(`▶️ เริ่มสตรีม YouTube: ${youtubeUrl}`);
 
-    const { mediaUrl, headerLines } = await resolveDirectUrl(youtubeUrl);
+        const { mediaUrl, headerLines } = await resolveDirectUrl(youtubeUrl);
 
-    const icecastUrl = `icecast://${cfg.icecast.username}:${cfg.icecast.password}` +
-        `@${cfg.icecast.host}:${cfg.icecast.port}${cfg.icecast.mount}`;
+        const icecastUrl = `icecast://${cfg.icecast.username}:${cfg.icecast.password}` +
+            `@${cfg.icecast.host}:${cfg.icecast.port}${cfg.icecast.mount}`;
 
-    const ffArgs = [
-        '-hide_banner', '-loglevel', 'warning', '-nostdin',
-        '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_at_eof', '1',
-        '-reconnect_on_network_error', '1', '-reconnect_delay_max', '5',
-        '-re'
-    ];
+        const ffArgs = [
+            '-hide_banner', '-loglevel', 'warning', '-nostdin',
+            '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_at_eof', '1',
+            '-reconnect_on_network_error', '1', '-reconnect_delay_max', '5',
+            '-re'
+        ];
 
-    if (headerLines && headerLines.length) {
-        ffArgs.push('-headers', headerLines);
-    }
+        if (headerLines && headerLines.length) ffArgs.push('-headers', headerLines);
 
-    ffArgs.push(
-        '-i', mediaUrl,
-        '-vn',
-        '-c:a', 'libmp3lame',
-        '-b:a', '128k',
-        '-content_type', 'audio/mpeg',
-        '-f', 'mp3',
-        icecastUrl
-    );
+        ffArgs.push(
+            '-i', mediaUrl,
+            '-vn',
+            '-c:a', 'libmp3lame',
+            '-b:a', '128k',
+            '-content_type', 'audio/mpeg',
+            '-f', 'mp3',
+            icecastUrl
+        );
 
-    ffmpegProcess = spawn('ffmpeg', ffArgs, { stdio: ['ignore', 'ignore', 'pipe'] });
-    wireChildLogging(ffmpegProcess, 'ffmpeg');
+        ffmpegProcess = spawn('ffmpeg', ffArgs, { stdio: ['ignore', 'ignore', 'pipe'] });
+        wireChildLogging(ffmpegProcess, 'ffmpeg');
 
-    ffmpegProcess.on('close', (code) => {
-        console.log(`🎵 สตรีม YouTube จบการทำงาน (รหัส ${code})`);
-        const endedUrl = currentStreamUrl;
-        ffmpegProcess = null;
+        ffmpegProcess.on('close', (code) => {
+            console.log(`🎵 สตรีม YouTube จบการทำงาน (รหัส ${code})`);
+            const endedUrl = currentStreamUrl;
+            ffmpegProcess = null;
+            isPaused = false;
+            currentStreamUrl = null;
+            bus.emit('status', { event: 'ended', reason: 'ffmpeg-closed', code });
+
+            if (cfg.stream.autoReplayOnEnd && endedUrl) {
+                setTimeout(() => {
+                    console.log('🔁 Auto replay same URL');
+                    start(endedUrl).catch(e => console.error('Auto replay failed:', e));
+                }, 1500);
+            }
+        });
+
         isPaused = false;
-        currentStreamUrl = null;
-        bus.emit('status', { event: 'ended', reason: 'ffmpeg-closed', code });
-
-        if (cfg.stream.autoReplayOnEnd && endedUrl) {
-            setTimeout(() => {
-                console.log('🔁 Auto replay same URL');
-                start(endedUrl).catch(e => console.error('Auto replay failed:', e));
-            }, 1500);
-        }
-    });
-
-    isPaused = false;
-    currentStreamUrl = youtubeUrl;
-    bus.emit('status', { event: 'started', url: youtubeUrl });
+        currentStreamUrl = youtubeUrl;
+        bus.emit('status', { event: 'started', url: youtubeUrl });
+    } finally {
+        starting = false;
+    }
 }
 
 async function startLocalFile(filePath) {
-    await stopAll();
-    console.log(`▶️ เริ่มสตรีมไฟล์ในเครื่อง: ${filePath}`);
+    while (starting) await sleep(50);
+    starting = true;
+    try {
+        await stopAll();
+        console.log(`▶️ เริ่มสตรีมไฟล์ในเครื่อง: ${filePath}`);
 
-    const absPath = path.resolve(filePath);
+        const absPath = path.resolve(filePath);
 
-    const icecastUrl = `icecast://${cfg.icecast.username}:${cfg.icecast.password}` +
-        `@${cfg.icecast.host}:${cfg.icecast.port}${cfg.icecast.mount}`;
+        const icecastUrl = `icecast://${cfg.icecast.username}:${cfg.icecast.password}` +
+            `@${cfg.icecast.host}:${cfg.icecast.port}${cfg.icecast.mount}`;
 
-    const ffArgs = [
-        '-hide_banner', '-loglevel', 'warning', '-nostdin',
-        '-re', // เล่นแบบ real-time speed
-        '-i', absPath, // ไฟล์ในเครื่อง
-        '-vn', // ไม่เอาวิดีโอ
-        '-c:a', 'libmp3lame',
-        '-b:a', '128k',
-        '-content_type', 'audio/mpeg',
-        '-f', 'mp3',
-        icecastUrl
-    ];
+        const ffArgs = [
+            '-hide_banner', '-loglevel', 'warning', '-nostdin',
+            '-re',
+            '-i', absPath,
+            '-vn',
+            '-c:a', 'libmp3lame',
+            '-b:a', '128k',
+            '-content_type', 'audio/mpeg',
+            '-f', 'mp3',
+            icecastUrl
+        ];
 
-    ffmpegProcess = spawn('ffmpeg', ffArgs, { stdio: ['ignore', 'ignore', 'pipe'] });
-    wireChildLogging(ffmpegProcess, 'ffmpeg');
+        ffmpegProcess = spawn('ffmpeg', ffArgs, { stdio: ['ignore', 'ignore', 'pipe'] });
+        wireChildLogging(ffmpegProcess, 'ffmpeg');
 
-    ffmpegProcess.on('close', (code) => {
-        console.log(`🎵 สตรีมไฟล์ในเครื่องจบการทำงาน (รหัส ${code})`);
-        const endedUrl = currentStreamUrl;
-        ffmpegProcess = null;
+        ffmpegProcess.on('close', (code) => {
+            console.log(`🎵 สตรีมไฟล์ในเครื่องจบการทำงาน (รหัส ${code})`);
+            const endedUrl = currentStreamUrl;
+            ffmpegProcess = null;
+            isPaused = false;
+            currentStreamUrl = null;
+            bus.emit('status', { event: 'ended', reason: 'ffmpeg-closed', code });
+
+            if (cfg.stream.autoReplayOnEnd && endedUrl) {
+                setTimeout(() => {
+                    console.log('🔁 Auto replay same file');
+                    startLocalFile(endedUrl).catch(e => console.error('Auto replay failed:', e));
+                }, 1500);
+            }
+        });
+
         isPaused = false;
-        currentStreamUrl = null;
-        bus.emit('status', { event: 'ended', reason: 'ffmpeg-closed', code });
-
-        if (cfg.stream.autoReplayOnEnd && endedUrl) {
-            setTimeout(() => {
-                console.log('🔁 Auto replay same file');
-                startLocalFile(endedUrl).catch(e => console.error('Auto replay failed:', e));
-            }, 1500);
-        }
-    });
-
-    isPaused = false;
-    currentStreamUrl = absPath;
-    bus.emit('status', { event: 'started', url: absPath });
+        currentStreamUrl = absPath;
+        bus.emit('status', { event: 'started', url: absPath });
+    } finally {
+        starting = false;
+    }
 }
 
 function pause() {
@@ -196,7 +226,6 @@ function getStatus() {
 
 async function uploadSongYT(youtubeUrl, filename) {
     const uploadDir = path.join(__dirname, '../uploads');
-
     if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir);
 
     const safeName = filename
@@ -204,9 +233,7 @@ async function uploadSongYT(youtubeUrl, filename) {
         : `song-${Date.now()}`;
 
     const outputName = `${safeName}-${Math.random().toString(36).slice(2)}.mp3`;
-
     const outputPath = path.join(uploadDir, outputName);
-
     const tempFile = path.join(uploadDir, `temp-${Date.now()}.m4a`);
 
     await ytdlp(youtubeUrl, {
@@ -227,18 +254,79 @@ async function uploadSongYT(youtubeUrl, filename) {
 
     fs.unlinkSync(tempFile);
 
-    const song = new Song({
-        name: safeName,
-        url: outputName,
-    });
-
+    const song = new Song({ name: safeName, url: outputName });
     await song.save();
-
-    return outputName
+    return outputName;
 }
 
 async function getSongList() {
     return await Song.find().sort({ no: 1 }).lean();
+}
+
+async function startMicStream(ws) {
+    // ถ้ามี client เก่าอยู่ ตัดทิ้งก่อน
+    if (activeWs && activeWs !== ws) {
+        try { activeWs.terminate(); } catch { }
+        activeWs = null;
+    }
+
+    while (starting) await sleep(50);
+    starting = true;
+
+    try {
+        await stopAll();
+        console.log("🎤 เริ่มสตรีมเสียงจาก Flutter");
+        activeWs = ws;
+
+        const icecastUrl = `icecast://${cfg.icecast.username}:${cfg.icecast.password}` +
+            `@${cfg.icecast.host}:${cfg.icecast.port}${cfg.icecast.mount}`;
+
+        const ffArgs = [
+            '-hide_banner', '-loglevel', 'warning', '-nostdin',
+            '-f', 's16le',
+            '-ar', '44100',
+            '-ac', '2',
+            '-i', 'pipe:0',
+            // ปรับดังขึ้น +6 dB (ลอง 2.0 → 200%)
+            '-af', 'volume=2.0',
+            '-c:a', 'libmp3lame',
+            '-b:a', '128k',
+            '-content_type', 'audio/mpeg',
+            '-f', 'mp3',
+            icecastUrl
+        ];
+
+        ffmpegProcess = spawn('ffmpeg', ffArgs, { stdio: ['pipe', 'ignore', 'pipe'] });
+        wireChildLogging(ffmpegProcess, 'ffmpeg');
+
+        ws.on('message', (msg) => {
+            if (!ffmpegProcess || ffmpegProcess.exitCode !== null) return;
+            if (Buffer.isBuffer(msg)) ffmpegProcess.stdin.write(msg);
+        });
+
+        const cleanClose = async () => {
+            console.log("❌ Flutter mic disconnected");
+            try { ffmpegProcess?.stdin?.end(); } catch { }
+            await stopAll();
+            if (activeWs === ws) activeWs = null;
+        };
+
+        ws.on('close', cleanClose);
+        ws.on('error', (err) => {
+            console.error('⚠️ WebSocket error:', err.message);
+            cleanClose();
+        });
+
+        ffmpegProcess.on('close', (code) => {
+            console.log(`🎵 ffmpeg for mic closed (code ${code})`);
+        });
+
+        isPaused = false;
+        currentStreamUrl = "flutter-mic";
+        bus.emit('status', { event: 'started', url: currentStreamUrl });
+    } finally {
+        starting = false;
+    }
 }
 
 module.exports = {
@@ -250,7 +338,6 @@ module.exports = {
     uploadSongYT,
     getSongList,
     startLocalFile,
-    _internals: {
-        isAlive: (p) => isAlive(p),
-    }
+    startMicStream,
+    _internals: { isAlive: (p) => isAlive(p) }
 };
