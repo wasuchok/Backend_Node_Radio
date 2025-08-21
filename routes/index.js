@@ -8,5 +8,6 @@ router.use('/stream', require('./stream.routes'));
 router.use('/mqtt', require('./mqtt.routes'));
 router.use('/device', require('./device.routes'))
 router.use('/auth', require('./user.routes'))
+router.use('/playlist', require('./playlist.routes'))
 
 module.exports = router;
