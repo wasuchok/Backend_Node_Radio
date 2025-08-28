@@ -130,14 +130,4 @@ async function uploadSongYT(req, res) {
     }
 }
 
-async function getSongList(req, res) {
-    try {
-        const list = await stream.getSongList();
-        res.json({ status: 'success', data: list });
-    } catch (error) {
-        console.error('Error getting song list:', error);
-        res.status(500).json({ status: 'error', message: error.message || 'get song list failed' });
-    }
-}
-
-module.exports = { start, stop, status, pause, resume, uploadSongYT, getSongList, upload, uploadSongFile, startFile };
+module.exports = { start, stop, status, pause, resume, uploadSongYT, upload, uploadSongFile, startFile };

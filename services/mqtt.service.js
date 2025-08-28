@@ -191,10 +191,10 @@ async function checkOfflineZones() {
     const onlineZones = [];
     const offlineZones = [];
 
-    // ถ้า array ว่าง = ไม่มีข้อมูลเลย
+    
     if (deviceStatus.length === 0) {
         try {
-            // update ทุก device ให้เป็น offline
+           
             await Device.updateMany(
                 {},
                 {
@@ -207,7 +207,7 @@ async function checkOfflineZones() {
                 }
             );
 
-            // broadcast ว่า offline ทุกตัว
+           
             const allDevices = await Device.find({});
             allDevices.forEach(d => {
                 broadcast({
@@ -223,10 +223,10 @@ async function checkOfflineZones() {
         } catch (err) {
             console.error("❌ Failed to mark all devices offline:", err.message);
         }
-        return; // ออกจากฟังก์ชัน ไม่ต้องทำต่อ
+        return; 
     }
 
-    // กรณีมีบาง zone อยู่ → เช็คแบบปกติ
+ 
     deviceStatus = deviceStatus.filter(d => {
         const online = now - d.lastSeen <= 35000;
         if (online) {

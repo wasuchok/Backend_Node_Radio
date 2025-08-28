@@ -17,12 +17,18 @@ async function login(req, res) {
   try {
     const { username, password } = req.body;
 
-    const { refreshToken, ...rest } = await loginUser(username, password);
+    const { refreshToken, accessToken, ...rest } = await loginUser(username, password);
     res.cookie("refreshToken", refreshToken, {
       httpOnly: true,
       secure: false,
       sameSite: "Strict",
       maxAge: 7 * 24 * 60 * 60 * 1000,
+    });
+    res.cookie("accessToken", accessToken, {
+      httpOnly: true,
+      secure: false,
+      sameSite: "Strict",
+      maxAge: 15 * 60 * 1000,
     });
     res.json({ ok: true, result: rest });
   } catch (error) {
@@ -64,7 +70,16 @@ async function refreshToken(req, res) {
           { expiresIn: "15m" }
         );
 
+        // ตั้งค่า cookie ใหม่
+        res.cookie("accessToken", newAccessToken, {
+          httpOnly: true,
+          secure: false,
+          sameSite: "Strict",
+          maxAge: 15 * 60 * 1000,
+        });
+
         return res.json({
+          ok: true,
           message: "ออก accessToken ใหม่สำเร็จ",
           accessToken: newAccessToken,
         });
@@ -76,4 +91,45 @@ async function refreshToken(req, res) {
   }
 }
 
-module.exports = { register, login, refreshToken };
+async function logout(req, res) {
+  try {
+    const refreshToken = req.cookies?.refreshToken;
+
+    if (refreshToken) {
+      // ลบ refresh token จากฐานข้อมูล
+      await User.updateOne(
+        { refreshToken },
+        { $unset: { refreshToken: "" } }
+      );
+    }
+
+    // ลบ cookies
+    res.clearCookie('accessToken');
+    res.clearCookie('refreshToken');
+
+    res.json({
+      ok: true,
+      message: "ออกจากระบบสำเร็จ"
+    });
+  } catch (error) {
+    console.error('Logout error:', error);
+    res.status(400).json({ ok: false, error: error.message });
+  }
+}
+
+async function getProfile(req, res) {
+  try {
+    res.json({
+      ok: true,
+      user: {
+        userId: req.user.userId,
+        username: req.user.username
+      }
+    });
+  } catch (error) {
+    console.error('Get profile error:', error);
+    res.status(400).json({ ok: false, error: error.message });
+  }
+}
+
+module.exports = { register, login, refreshToken, logout, getProfile };

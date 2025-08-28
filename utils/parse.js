@@ -5,11 +5,7 @@ function tryParseJson(buf) {
 
 const isHttpUrl = (x) => typeof x === 'string' && /^https?:\/\/\S+/i.test(x);
 
-/**
- * รองรับ:
- *  "start <url>", "stop", "pause", "resume", "status"
- *  หรือ JSON { cmd:"start", url:"..." } | { action:"start", url:"..." }
- */
+
 function parseCommandPayload(payloadBuf) {
     const data = tryParseJson(payloadBuf);
 

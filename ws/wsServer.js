@@ -1,4 +1,4 @@
-// ws/wsServer.js (แทนไฟล์เดิมของคุณ)
+
 const WebSocket = require('ws');
 const { URL } = require('url');
 const { startMicStream } = require('../services/stream.service');

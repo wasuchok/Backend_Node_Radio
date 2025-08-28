@@ -9,5 +9,6 @@ router.use('/mqtt', require('./mqtt.routes'));
 router.use('/device', require('./device.routes'))
 router.use('/auth', require('./user.routes'))
 router.use('/playlist', require('./playlist.routes'))
+router.use('/song', require('./song.routes'))
 
 module.exports = router;

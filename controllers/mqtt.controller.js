@@ -27,4 +27,12 @@ async function publishGetStatusAndWait(req, res) {
     }
 }
 
-module.exports = { publish, publishGetStatusAndWait };
+async function getStatus(req, res) {
+    try {
+        res.json(mqttSvc.getStatus());
+    } catch (err) {
+        res.status(500).json({ error: 'Get status failed', details: err.message });
+    }
+}
+
+module.exports = { publish, publishGetStatusAndWait, getStatus };
